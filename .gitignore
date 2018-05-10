@@ -4,3 +4,6 @@ dataset/SNLI
 encoder/infersent.allnli.pickle
 
 *.swp
+
+saved*
+__pycache__

@@ -35,7 +35,7 @@ class BLSTMEncoder(nn.Module):
 
     def is_cuda(self):
         # either all weights are on cpu or they are on gpu
-        return 'cuda' in str(type(self.enc_lstm.bias_hh_l0.data))
+        return 'cuda' in str(self.enc_lstm.bias_hh_l0.device)
 
     def forward(self, sent_tuple):
         # sent_len: [max_len, ..., min_len] (bsize)
@@ -614,12 +614,11 @@ class InnerAttentionMILAEncoder(nn.Module):
         alphas4 = self.softmax(keys4).unsqueeze(2).expand_as(sent_key_proj)
         emb4 = torch.sum(alphas4 * sent_output_proj, 1).squeeze(1)
 
-
-        if int(time.time()) % 100 == 0:
-            print('alphas', torch.cat((alphas1.data[0, :, 0],
-                                       alphas2.data[0, :, 0],
-                                       torch.abs(alphas1.data[0, :, 0] -
-                                                 alphas2.data[0, :, 0])), 1))
+        # if int(time.time()) % 100 == 0:
+        #     print('alphas', torch.cat((alphas1.data[0, :, 0],
+        #                                alphas2.data[0, :, 0],
+        #                                torch.abs(alphas1.data[0, :, 0] -
+        #                                          alphas2.data[0, :, 0])), 1))
 
         emb = torch.cat((emb1, emb2, emb3, emb4), 1)
         return emb
@@ -698,9 +697,9 @@ class InnerAttentionYANGEncoder(nn.Module):
         sent_alphas = self.softmax(sent_M.bmm(sent_w).squeeze(2)).unsqueeze(1)
         # (bsize, 1, seqlen)
 
-        if int(time.time()) % 200 == 0:
-            print('w', torch.max(sent_w[0]), torch.min(sent_w[0]))
-            print('alphas', sent_alphas[0][0][0:sent_len[0]])
+        # if int(time.time()) % 200 == 0:
+        #     print('w', torch.max(sent_w[0]), torch.min(sent_w[0]))
+        #     print('alphas', sent_alphas[0][0][0:sent_len[0]])
         # Get attention vector
         emb = sent_alphas.bmm(sent_output_proj).squeeze(1)
 
