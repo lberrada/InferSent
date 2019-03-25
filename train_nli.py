@@ -6,11 +6,8 @@
 #
 
 import sys
-sys.path.insert(1, '..')
-from losses import MultiClassHingeLoss, set_smoothing_enabled
-from optim import get_optimizer
-from utils import get_xp, log_metrics, accuracy, regularization, update_metrics
-from cuda import set_cuda
+import os
+
 
 import os
 import argparse
@@ -18,8 +15,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from cuda import set_cuda
+from svm import MultiClassHingeLoss, set_smoothing_enabled
 from data import get_nli, get_batch, build_vocab
-from mutils import adapt_grad_norm
+from mutils import adapt_grad_norm, get_xp, accuracy
 from models import NLINet
 from tqdm import tqdm
 
@@ -32,8 +31,8 @@ parser = argparse.ArgumentParser(description='NLI training')
 parser.add_argument("--nlipath", type=str, default='dataset/SNLI/', help="NLI data path (SNLI or MultiNLI)")
 parser.add_argument("--outputdir", type=str, default='savedir/', help="Output directory")
 parser.add_argument("--outputmodelname", type=str, default='model.pickle')
-parser.add_argument("--server", type=str, default=None)
-parser.add_argument("--port", type=int, default=9014)
+parser.add_argument("--server", type=str, default='http://atlas.robots.ox.ac.uk')
+parser.add_argument("--port", type=int, default=9003)
 parser.add_argument('--no-tqdm', dest='tqdm', action='store_false', help="use of tqdm progress bars")
 parser.set_defaults(tqdm=True)
 
@@ -147,16 +146,15 @@ nli_net.cuda()
 loss_fn.cuda()
 
 # optimizer
-optimizer = get_optimizer(params, parameters=nli_net.parameters())
+if params.opt == 'nr':
+    from nr import NR
+    optimizer = NR(nli_net.parameters(), eta=params.eta)
+    optimizer.gamma = 1
+    optimizer.eta = -1
+else:
+    optimizer = get_optimizer(params, parameters=nli_net.parameters())
 
 params.visdom = True
-if params.server is None:
-    if 'VISDOM_SERVER' in os.environ:
-        params.server = os.environ['VISDOM_SERVER']
-    else:
-        params.visdom = False
-params.dump_epoch = False
-params.log = True
 xp_name = '{}--{}--{}--eta-{}'.format(params.encoder_type, params.opt, params.loss, params.eta)
 if params.smooth_svm:
     xp_name = xp_name + '--smooth'
@@ -165,7 +163,7 @@ params.xp_name = '../../xp/snli/{}'.format(xp_name)
 
 if not os.path.exists(params.xp_name):
     os.makedirs(params.xp_name)
-xp = get_xp(params, nli_net, optimizer)
+xp = get_xp(params)
 
 
 """
@@ -175,7 +173,6 @@ val_acc_best = -1e10
 
 
 def trainepoch(epoch):
-    xp.Epoch.update(1).log()
     print('\nTRAINING : Epoch ' + str(epoch))
     nli_net.train()
     # shuffle the data
@@ -187,9 +184,11 @@ def trainepoch(epoch):
 
     if epoch > 1 and params.opt == 'sgd':
         optimizer.param_groups[0]['lr'] *= params.decay
-        optimizer.eta = optimizer.param_groups[0]['lr']
+        optimizer.step_size = optimizer.param_groups[0]['lr']
 
-    xp.Timer_Train.reset()
+    for metric in xp.train_metrics:
+        metric.reset()
+
     stats = {}
 
     for stidx in tqdm(range(0, len(s1), params.batch_size), disable=not params.tqdm,
@@ -208,37 +207,32 @@ def trainepoch(epoch):
         # backward
         optimizer.zero_grad()
         loss.backward()
-        if params.opt != 'dfw':
+        if params.opt not in ('dfw', 'nr'):
             adapt_grad_norm(nli_net, params.max_norm)
         # necessary information for the step-size of some optimizers -> provide closure
         optimizer.step(lambda: float(loss))
 
         # track statistics for monitoring
-        stats['loss'] = float(loss_fn(scores, tgt_batch))
-        stats['acc'] = float(accuracy(scores, tgt_batch))
-        stats['gamma'] = float(optimizer.gamma)
-        stats['size'] = float(tgt_batch.size(0))
-        update_metrics(xp, stats)
+        batch_size = tgt_batch.size(0)
+        xp.obj.update(loss, n=batch_size)
+        xp.step_size.update(optimizer.step_size, n=batch_size)
+        xp.acc.update(accuracy(scores, tgt_batch), n=batch_size)
 
-    xp.Eta.update(optimizer.eta)
-    xp.Reg.update(regularization(nli_net, params.l2))
-    xp.Obj_Train.update(xp.Reg.value + xp.Loss_Train.value)
-    xp.Timer_Train.update()
+    xp.timer.update()
 
     print('results : epoch {0} ; mean accuracy train : {1}'
-          .format(epoch, xp.acc_train))
+          .format(epoch, xp.acc.value))
     print('\nEpoch: [{0}] (Train) \t'
           '({timer:.2f}s) \t'
           'Obj {obj:.3f}\t'
-          'Loss {loss:.3f}\t'
           'Acc {acc:.2f}%\t'
-          .format(int(xp.Epoch.value),
-                  timer=xp.Timer_Train.value,
-                  acc=xp.Acc_Train.value,
-                  obj=xp.Obj_Train.value,
-                  loss=xp.Loss_Train.value))
+          .format(int(xp.epoch.value),
+                  timer=xp.timer.value,
+                  acc=xp.acc.value,
+                  obj=xp.obj.value))
 
-    log_metrics(xp)
+    for metric in xp.train_metrics:
+        metric.record(xp.epoch.value, legend='train')
 
 
 def evaluate(epoch, eval_type='valid', final_eval=False):
@@ -251,10 +245,8 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
     else:
         tag = 'test'
 
-    Acc = xp.get_metric(name='acc', tag=tag)
-    Timer = xp.get_metric(name='timer', tag=tag)
-    Acc.reset()
-    Timer.reset()
+    for metric in xp.eval_metrics:
+        metric.reset()
 
     s1 = valid['s1'] if eval_type == 'valid' else test['s1']
     s2 = valid['s2'] if eval_type == 'valid' else test['s2']
@@ -271,11 +263,8 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
         # model forward
         scores = nli_net((s1_batch, s1_len), (s2_batch, s2_len))
 
-        acc = float(accuracy(scores, tgt_batch))
-        Acc.update(acc, n=tgt_batch.size(0))
+        xp.acc.update(accuracy(scores, tgt_batch), n=tgt_batch.size(0))
 
-    Timer.update().log()
-    Acc.log()
     print('Epoch: [{0}] ({tag})\t'
           '({timer:.2f}s) \t'
           'Obj ----\t'
@@ -287,7 +276,10 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
                   acc=Acc.value))
 
     if tag == 'val':
-        xp.Acc_Valbest.update(xp.Acc_Val.value).log()
+        xp.acc_best.update(xp.acc.value).record()
+
+    for metric in xp.eval_metrics:
+        metric.record(xp.epoch.value, legend=tag)
 
     # save model
     eval_acc = Acc.value
@@ -320,6 +312,7 @@ Train model on Natural Language Inference task
 epoch = 1
 
 while epoch <= params.n_epochs:
+    xp.epoch.update(epoch)
     trainepoch(epoch)
     evaluate(epoch, 'valid')
     epoch += 1
@@ -337,3 +330,4 @@ evaluate(0, 'test', True)
 if params.log:
     torch.save(nli_net.encoder,
                os.path.join(params.outputdir, params.outputmodelname + '.encoder'))
+    torch.save(xp.state_dict(), "{}/results.pth".forat(params.xp_name))

@@ -5,6 +5,48 @@
 # LICENSE file in the root directory of this source tree.
 #
 import numpy as np
+import torch
+import logger
+
+
+def get_xp(args):
+    env_name = args.xp_name.split('/')[-1]
+    print(env_name, args.server, args.port)
+    plotter = logger.Plotter({'env': env_name, 'server': args.server, 'port': args.port})
+    xp = logger.Experiment(args.xp_name, plotter)
+
+    xp.epoch = logger.SimpleMetric()
+    xp.acc = logger.AvgMetric()
+    xp.best_acc = logger.BestMetric()
+    xp.timer = logger.TimeMetric()
+    xp.obj = logger.AvgMetric()
+    xp.step_size = logger.AvgMetric()
+
+    xp.train_metrics = (xp.timer, xp.step_size, xp.acc, xp.obj)
+    xp.eval_metrics = (xp.timer, xp.acc)
+
+    xp.config.update(**vars(args))
+    xp.config.record()
+
+    if args.visdom:
+        plotter.set_win_opts("step_size", {'ytype': 'log'})
+        xp.best_acc.link_plotter(plotter, plot_title='acc')
+
+    return xp
+
+
+@torch.autograd.no_grad()
+def accuracy(out, targets, topk=1):
+    if topk == 1:
+        _, pred = torch.max(out, 1)
+        acc = torch.mean(torch.eq(pred, targets).float())
+    else:
+        _, pred = out.topk(topk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(targets.view(1, -1).expand_as(pred))
+        acc = correct[:topk].view(-1).float().sum(0) / out.size(0)
+
+    return 100. * acc
 
 
 def adapt_grad_norm(model, max_grad_norm=None):
