@@ -270,19 +270,19 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
           'Obj ----\t'
           'Loss ----\t'
           'Acc {acc:.2f}% \t'
-          .format(int(xp.Epoch.value),
+          .format(int(xp.epoch.value),
                   tag=tag.title(),
-                  timer=Timer.value,
-                  acc=Acc.value))
+                  timer=xp.timer.value,
+                  acc=xp.acc.value))
 
     if tag == 'val':
-        xp.acc_best.update(xp.acc.value).record()
+        xp.acc_best.update(xp.acc.value).record(xp.epoch.value)
 
     for metric in xp.eval_metrics:
         metric.record(xp.epoch.value, legend=tag)
 
     # save model
-    eval_acc = Acc.value
+    eval_acc = xp.acc.value
     if final_eval:
         print('finalgrep : accuracy {0} : {1}'.format(eval_type, eval_acc))
     else:

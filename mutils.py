@@ -11,7 +11,6 @@ import logger
 
 def get_xp(args):
     env_name = args.xp_name.split('/')[-1]
-    print(env_name, args.server, args.port)
     plotter = logger.Plotter({'env': env_name, 'server': args.server, 'port': args.port})
     xp = logger.Experiment(args.xp_name, plotter)
 
