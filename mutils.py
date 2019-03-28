@@ -9,29 +9,43 @@ import torch
 import logger
 
 
-def get_xp(args):
-    env_name = args.xp_name.split('/')[-1]
-    plotter = logger.Plotter({'env': env_name, 'server': args.server, 'port': args.port})
-    xp = logger.Experiment(args.xp_name, plotter)
+def save_state(metrics, plotter, name):
+    state = logger.state_dict(metrics.values(), plotter)
+    torch.save(state, name)
 
-    xp.epoch = logger.SimpleMetric()
-    xp.acc = logger.AvgMetric()
-    xp.best_acc = logger.BestMetric()
-    xp.timer = logger.TimeMetric()
-    xp.obj = logger.AvgMetric()
-    xp.step_size = logger.AvgMetric()
 
-    xp.train_metrics = (xp.timer, xp.step_size, xp.acc, xp.obj)
-    xp.eval_metrics = (xp.timer, xp.acc)
+def setup_xp(args):
+    args.env_name = args.xp_name.split('/')[-1]
 
-    xp.config.update(**vars(args))
-    xp.config.record()
+    config = logger.Config(**vars(args))
+
+    epoch = logger.metric.Simple()
+    acc = logger.metric.Average()
+    best_acc = logger.metric.Maximum()
+    timer = logger.metric.Timer()
+    obj = logger.metric.Average()
+    step_size = logger.metric.Average()
 
     if args.visdom:
-        plotter.set_win_opts("step_size", {'ytype': 'log'})
-        xp.best_acc.link_plotter(plotter, plot_title='acc')
+        visdom_opts = {'env': args.env_name, 'server': args.server, 'port': args.port}
+        plotter = logger.VisdomPlotter(visdom_opts)
 
-    return xp
+        config.plot_on(plotter)
+        acc.plot_on(plotter, 'Accuracy')
+        best_acc.plot_on(plotter, 'Accuracy')
+        obj.plot_on(plotter, 'Objective')
+        step_size.plot_on(plotter, 'Step-Size')
+
+        plotter.set_win_opts("Step-Size", {'ytype': 'log'})
+
+    logger.set_global('plotter', plotter)
+    logger.set_global('config', config)
+    logger.set_global('epoch', epoch)
+    logger.set_global('acc', acc)
+    logger.set_global('best_acc', best_acc)
+    logger.set_global('timer', timer)
+    logger.set_global('obj', obj)
+    logger.set_global('step_size', step_size)
 
 
 @torch.autograd.no_grad()
