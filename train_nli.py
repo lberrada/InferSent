@@ -7,7 +7,7 @@
 
 import sys
 import os
-import logger
+import mlogger
 import argparse
 import numpy as np
 import torch
@@ -144,28 +144,35 @@ nli_net.cuda()
 loss_fn.cuda()
 
 # optimizer
-if params.opt == 'nr':
-    from nr import NR
-    optimizer = NR(nli_net.parameters(), eta=params.eta)
+if params.opt == 'nrgd':
+    from nr import NRGD
+    optimizer = NRGD(nli_net.parameters(), eta=params.eta)
 elif params.opt == 'l4adam':
     from l4pytorch import L4Adam
-    optimizer = L4Adam(nli_net.parameters())
+    optimizer = L4Adam(nli_net.parameters(), fraction=params.eta)
 elif params.opt == 'l4mom':
     from l4pytorch import L4Mom
-    optimizer = L4Mom(nli_net.parameters())
+    optimizer = L4Mom(nli_net.parameters(), fraction=params.eta)
 else:
     optimizer = get_optimizer(params, parameters=nli_net.parameters())
+
+optimizer.step_size = params.eta
+optimizer.step_size_unclipped = params.eta
+optimizer.momentum = params.momentum
 
 params.visdom = True
 xp_name = '{}--{}--{}--eta-{}'.format(params.encoder_type, params.opt, params.loss, params.eta)
 if params.smooth_svm:
     xp_name = xp_name + '--smooth'
+params.log = True
 params.outputdir = './saved/{}'.format(xp_name)
-params.xp_name = '../../xp/snli/{}'.format(xp_name)
+params.xp_name = './xp/{}'.format(xp_name)
 
 if not os.path.exists(params.xp_name):
     os.makedirs(params.xp_name)
-setup_xp(params)
+else:
+    raise ValueError('Experiment already exists at {}'.format(params.xp_name))
+xp = setup_xp(params, nli_net, optimizer)
 
 
 """
@@ -188,12 +195,8 @@ def trainepoch(epoch):
         optimizer.param_groups[0]['lr'] *= params.decay
         optimizer.step_size = optimizer.param_groups[0]['lr']
 
-    Epoch = logger.get_global('epoch')
-
-    Obj = logger.get_global('obj').reset()
-    Acc = logger.get_global('acc').reset()
-    Step_Size = logger.get_global('step_size').reset()
-    Timer = logger.get_global('timer').reset()
+    for metric in xp.train.metrics():
+        metric.reset()
 
     for stidx in tqdm(range(0, len(s1), params.batch_size), disable=not params.tqdm,
                       desc='Train Epoch', leave=False):
@@ -211,33 +214,38 @@ def trainepoch(epoch):
         # backward
         optimizer.zero_grad()
         loss.backward()
-        if params.opt not in ('dfw', 'nr', 'l4mom', 'l4adam'):
+        if params.opt not in ('dfw', 'nrgd', 'l4mom', 'l4adam'):
             adapt_grad_norm(nli_net, params.max_norm)
         # necessary information for the step-size of some optimizers -> provide closure
         optimizer.step(lambda: float(loss))
 
-        # track statistics for monitoring
-        batch_size = tgt_batch.size(0)
-        Obj.update(loss, weighting=batch_size)
-        Step_Size.update(optimizer.step_size, weighting=batch_size)
-        Acc.update(accuracy(scores, tgt_batch), weighting=batch_size)
+        # monitoring
+        batch_size = scores.size(0)
+        xp.train.acc.update(accuracy(scores, tgt_batch), weighting=batch_size)
+        xp.train.loss.update(loss_fn(scores, tgt_batch), weighting=batch_size)
+        xp.train.step_size.update(optimizer.step_size, weighting=batch_size)
+        xp.train.step_size_u.update(optimizer.step_size_unclipped, weighting=batch_size)
 
-    Timer.update()
+    xp.train.weight_norm.update(torch.sqrt(sum(p.norm() ** 2 for p in nli_net.parameters())))
+    xp.train.reg.update(0.5 * params.l2 * xp.train.weight_norm.value ** 2)
+    xp.train.obj.update(xp.train.reg.value + xp.train.loss.value)
+    xp.train.timer.update()
 
     print('results : epoch {0} ; mean accuracy train : {1}'
-          .format(epoch, Acc.value))
+          .format(int(xp.epoch.value), xp.train.acc.value))
     print('\nEpoch: [{0}] (Train) \t'
           '({timer:.2f}s) \t'
           'Obj {obj:.3f}\t'
+          'Loss {loss:.3f}\t'
           'Acc {acc:.2f}%\t'
-          .format(int(Epoch.value),
-                  timer=Timer.value,
-                  acc=Acc.value,
-                  obj=Obj.value))
+          .format(int(xp.epoch.value),
+                  timer=xp.train.timer.value,
+                  acc=xp.train.acc.value,
+                  obj=xp.train.obj.value,
+                  loss=xp.train.loss.value))
 
-    with logger.record_with_legend('train'):
-        for metric in (Obj, Acc, Step_Size, Timer):
-            metric.record()
+    for metric in xp.train.metrics():
+        metric.log(time=xp.epoch.value)
 
 
 def evaluate(epoch, eval_type='valid', final_eval=False):
@@ -250,9 +258,13 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
     else:
         tag = 'test'
 
-    Timer = logger.get_global('timer').reset()
-    Acc = logger.get_global('acc').reset()
-    Epoch = logger.get_global('epoch')
+    if tag == 'val':
+        xp_group = xp.val
+    else:
+        xp_group = xp.test
+
+    for metric in xp_group.metrics():
+        metric.reset()
 
     s1 = valid['s1'] if eval_type == 'valid' else test['s1']
     s2 = valid['s2'] if eval_type == 'valid' else test['s2']
@@ -268,28 +280,28 @@ def evaluate(epoch, eval_type='valid', final_eval=False):
 
         # model forward
         scores = nli_net((s1_batch, s1_len), (s2_batch, s2_len))
+        batch_size = scores.size(0)
+        xp_group.acc.update(accuracy(scores, tgt_batch), weighting=batch_size)
 
-        Acc.update(accuracy(scores, tgt_batch), weighting=tgt_batch.size(0))
+    xp_group.timer.update()
 
     print('Epoch: [{0}] ({tag})\t'
           '({timer:.2f}s) \t'
           'Obj ----\t'
           'Loss ----\t'
           'Acc {acc:.2f}% \t'
-          .format(int(Epoch.value),
+          .format(int(xp.epoch.value),
                   tag=tag.title(),
-                  timer=Timer.value,
-                  acc=Acc.value))
+                  timer=xp_group.timer.value,
+                  acc=xp_group.acc.value))
 
     if tag == 'val':
-        Best_Acc = logger.get_global('best_acc')
-        Best_Acc.update(Acc.value).record(forced_legend='best-val')
+        xp.max_val.update(xp.val.acc.value).log(time=xp.epoch.value)
 
-    eval_acc = Acc.value
-    with logger.record_with_legend(tag):
-        Acc.record()
-        Timer.record()
+    for metric in xp_group.metrics():
+        metric.log(time=xp.epoch.value)
 
+    eval_acc = xp_group.acc.value
     # save model
     if final_eval:
         print('finalgrep : accuracy {0} : {1}'.format(eval_type, eval_acc))
@@ -318,23 +330,21 @@ Train model on Natural Language Inference task
 """
 epoch = 1
 
-Epoch = logger.get_global('epoch')
-while epoch <= params.n_epochs:
-    Epoch.update(epoch)
-    trainepoch(epoch)
-    evaluate(epoch, 'valid')
-    epoch += 1
-    torch.save(logger.global_state_dict(), "{}/results.pth".format(params.xp_name))
+with mlogger.stdout_to("{}/log.txt".format(params.xp_name)):
+    while epoch <= params.n_epochs:
+        xp.epoch.update(epoch)
+        trainepoch(epoch)
+        evaluate(epoch, 'valid')
+        epoch += 1
 
-# Run best model on test set.
-del nli_net
-nli_net = torch.load(os.path.join(params.outputdir, params.outputmodelname))
+    # Run best model on test set.
+    del nli_net
+    nli_net = torch.load(os.path.join(params.outputdir, params.outputmodelname))
 
-print('\nTEST : Epoch {0}'.format(epoch))
-evaluate(1e6, 'valid', True)
-evaluate(0, 'test', True)
+    print('\nTEST : Epoch {0}'.format(epoch))
+    evaluate(1e6, 'valid', True)
+    evaluate(0, 'test', True)
 
-# Save encoder instead of full model
-torch.save(nli_net.encoder,
-           os.path.join(params.outputdir, params.outputmodelname + '.encoder'))
-torch.save(logger.global_state_dict(), "{}/results.pth".format(params.xp_name))
+    # Save encoder instead of full model
+    torch.save(nli_net.encoder,
+               os.path.join(params.outputdir, params.outputmodelname + '.encoder'))

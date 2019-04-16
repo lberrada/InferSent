@@ -6,46 +6,64 @@
 #
 import numpy as np
 import torch
-import logger
+import mlogger
 
 
-def save_state(metrics, plotter, name):
-    state = logger.state_dict(metrics.values(), plotter)
-    torch.save(state, name)
+def save_state(model, optimizer, filename):
+    torch.save({'model': model.state_dict(),
+                'optimizer': optimizer.state_dict()}, filename)
 
 
-def setup_xp(args):
-    args.env_name = args.xp_name.split('/')[-1]
+def setup_xp(args, model, optimizer):
 
-    config = logger.Config(**vars(args))
+    env_name = args.xp_name.split('/')[-1]
+    if args.visdom:
+        plotter = mlogger.VisdomPlotter({'env': env_name, 'server': args.server, 'port': args.port})
+    else:
+        plotter = None
 
-    epoch = logger.metric.Simple()
-    acc = logger.metric.Average()
-    best_acc = logger.metric.Maximum()
-    timer = logger.metric.Timer()
-    obj = logger.metric.Average()
-    step_size = logger.metric.Average()
+    xp = mlogger.Container()
+
+    xp.config = mlogger.Config(plotter=plotter, **vars(args))
+
+    xp.epoch = mlogger.metric.Simple()
+
+    xp.train = mlogger.Container()
+    xp.train.acc = mlogger.metric.Average(plotter=plotter, plot_title="Accuracy", plot_legend="training")
+    xp.train.loss = mlogger.metric.Average(plotter=plotter, plot_title="Objective", plot_legend="loss")
+    xp.train.obj = mlogger.metric.Simple(plotter=plotter, plot_title="Objective", plot_legend="objective")
+    xp.train.reg = mlogger.metric.Simple(plotter=plotter, plot_title="Objective", plot_legend="regularization")
+    xp.train.weight_norm = mlogger.metric.Simple(plotter=plotter, plot_title="Weight-Norm")
+    xp.train.step_size = mlogger.metric.Average(plotter=plotter, plot_title="Step-Size", plot_legend="clipped")
+    xp.train.step_size_u = mlogger.metric.Average(plotter=plotter, plot_title="Step-Size", plot_legend="unclipped")
+    xp.train.timer = mlogger.metric.Timer(plotter=plotter, plot_title="Time", plot_legend='training')
+
+    xp.val = mlogger.Container()
+    xp.val.acc = mlogger.metric.Average(plotter=plotter, plot_title="Accuracy", plot_legend="validation")
+    xp.val.timer = mlogger.metric.Timer(plotter=plotter, plot_title="Time", plot_legend='validation')
+    xp.max_val = mlogger.metric.Maximum(plotter=plotter, plot_title="Accuracy", plot_legend='best-validation')
+
+    xp.test = mlogger.Container()
+    xp.test.acc = mlogger.metric.Average(plotter=plotter, plot_title="Accuracy", plot_legend="test")
+    xp.test.timer = mlogger.metric.Timer(plotter=plotter, plot_title="Time", plot_legend='test')
 
     if args.visdom:
-        visdom_opts = {'env': args.env_name, 'server': args.server, 'port': args.port}
-        plotter = logger.VisdomPlotter(visdom_opts)
-
-        config.plot_on(plotter)
-        acc.plot_on(plotter, 'Accuracy')
-        best_acc.plot_on(plotter, 'Accuracy')
-        obj.plot_on(plotter, 'Objective')
-        step_size.plot_on(plotter, 'Step-Size')
-
         plotter.set_win_opts("Step-Size", {'ytype': 'log'})
+        plotter.set_win_opts("Objective", {'ytype': 'log'})
 
-    logger.set_global('plotter', plotter)
-    logger.set_global('config', config)
-    logger.set_global('epoch', epoch)
-    logger.set_global('acc', acc)
-    logger.set_global('best_acc', best_acc)
-    logger.set_global('timer', timer)
-    logger.set_global('obj', obj)
-    logger.set_global('step_size', step_size)
+    if args.log:
+        # log at each epoch
+        xp.epoch.hook_on_update(lambda: xp.save_to('{}/results.json'.format(args.xp_name)))
+        xp.epoch.hook_on_update(lambda: save_state(model, optimizer, '{}/model.pkl'.format(args.xp_name)))
+
+        # log after final evaluation on test set
+        xp.test.acc.hook_on_update(lambda: xp.save_to('{}/results.json'.format(args.xp_name)))
+        xp.test.acc.hook_on_update(lambda: save_state(model, optimizer, '{}/model.pkl'.format(args.xp_name)))
+
+        # save results and model for best validation performance
+        xp.max_val.hook_on_new_max(lambda: save_state(model, optimizer, '{}/best_model.pkl'.format(args.xp_name)))
+
+    return xp
 
 
 @torch.autograd.no_grad()
