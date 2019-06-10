@@ -16,7 +16,7 @@ import torch.nn as nn
 from cuda import set_cuda
 from svm import MultiClassHingeLoss, set_smoothing_enabled
 from data import get_nli, get_batch, build_vocab
-from mutils import adapt_grad_norm, setup_xp, accuracy
+from mutils import adapt_grad_norm, setup_xp, accuracy, get_loss, get_optimizer
 from models import NLINet
 from tqdm import tqdm
 
@@ -134,27 +134,14 @@ nli_net = NLINet(config_nli_model)
 print(nli_net)
 
 # loss
-if params.loss == 'svm':
-    loss_fn = MultiClassHingeLoss()
-else:
-    loss_fn = nn.CrossEntropyLoss()
+loss_fn = get_loss(params)
 
 # cuda by default
 nli_net.cuda()
 loss_fn.cuda()
 
 # optimizer
-if params.opt == 'nrgd':
-    from nr import NRGD
-    optimizer = NRGD(nli_net.parameters(), eta=params.eta)
-elif params.opt == 'l4adam':
-    from l4pytorch import L4Adam
-    optimizer = L4Adam(nli_net.parameters(), fraction=params.eta)
-elif params.opt == 'l4mom':
-    from l4pytorch import L4Mom
-    optimizer = L4Mom(nli_net.parameters(), fraction=params.eta)
-else:
-    optimizer = get_optimizer(params, parameters=nli_net.parameters())
+optimizer = get_optimizer(params, parameters=nli_net.parameters())
 
 optimizer.step_size = params.eta
 optimizer.step_size_unclipped = params.eta
@@ -214,7 +201,7 @@ def trainepoch(epoch):
         # backward
         optimizer.zero_grad()
         loss.backward()
-        if params.opt not in ('dfw', 'nrgd', 'l4mom', 'l4adam'):
+        if params.opt not in ('dfw', 'alig', 'l4mom', 'l4adam'):
             adapt_grad_norm(nli_net, params.max_norm)
         # necessary information for the step-size of some optimizers -> provide closure
         optimizer.step(lambda: float(loss))

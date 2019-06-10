@@ -3,10 +3,16 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-#
 import numpy as np
 import torch
 import mlogger
+import torch.optim
+
+from dfw import DFW
+from dfw.baselines import BPGrad
+from l4pytorch import L4Mom, L4Adam
+from alig.th import AliG
+from alig.th.projection import l2_projection
 
 
 def save_state(model, optimizer, filename):
@@ -122,3 +128,57 @@ class dotdict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
+
+
+def get_optimizer(args, parameters):
+    parameters = list(parameters)
+    if args.opt == 'sgd':
+        optimizer = torch.optim.SGD(parameters, lr=args.eta, weight_decay=args.l2,
+                                    momentum=args.momentum, nesterov=bool(args.momentum))
+    elif args.opt == "adam":
+        optimizer = torch.optim.Adam(parameters, lr=args.eta, weight_decay=args.l2)
+    elif args.opt == "adagrad":
+        optimizer = torch.optim.Adagrad(parameters, lr=args.eta, weight_decay=args.l2)
+    elif args.opt == "amsgrad":
+        optimizer = torch.optim.Adam(parameters, lr=args.eta, weight_decay=args.l2, amsgrad=True)
+    elif args.opt == 'dfw':
+        optimizer = DFW(parameters, eta=args.eta, momentum=args.momentum, weight_decay=args.l2)
+    elif args.opt == 'bpgrad':
+        optimizer = BPGrad(parameters, eta=args.eta, momentum=args.momentum, weight_decay=args.l2)
+    elif args.opt == 'alig':
+        optimizer = AliG(parameters, eta=args.eta, momentum=args.momentum,
+                         projection_fn=lambda: l2_projection(parameters, args.max_norm))
+    elif args.opt == 'bpgrad':
+        optimizer = BPGrad(parameters, eta=args.eta, momentum=args.momentum, weight_decay=args.l2)
+    elif args.opt == 'l4adam':
+        optimizer = L4Adam(parameters, weight_decay=args.l2)
+    elif args.opt == 'l4mom':
+        optimizer = L4Mom(parameters, weight_decay=args.l2)
+    else:
+        raise ValueError(args.opt)
+
+    print("Optimizer: \t {}".format(args.opt.upper()))
+
+    optimizer.step_size = args.eta
+    optimizer.step_size_unclipped = args.eta
+    optimizer.momentum = args.momentum
+
+    if args.load_opt:
+        state = torch.load(args.load_opt)['optimizer']
+        optimizer.load_state_dict(state)
+        print('Loaded optimizer from {}'.format(args.load_opt))
+
+    return optimizer
+
+
+def get_loss(args):
+    if args.opt == 'dfw' or args.loss == 'svm':
+        loss_fn = MultiClassHingeLoss()
+    else:
+        loss_fn = nn.CrossEntropyLoss()
+
+    print('L2 regularization: \t {}'.format(args.l2))
+    print('\nLoss function:')
+    print(loss_fn)
+
+    return loss_fn
