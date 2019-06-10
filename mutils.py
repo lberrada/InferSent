@@ -9,6 +9,7 @@ import mlogger
 import torch.optim
 
 from dfw import DFW
+from dfw.losses import MultiClassHingeLoss
 from dfw.baselines import BPGrad
 from l4pytorch import L4Mom, L4Adam
 from alig.th import AliG
