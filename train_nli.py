@@ -6,6 +6,7 @@
 #
 
 import sys
+import warnings
 import os
 import mlogger
 import argparse
@@ -29,10 +30,11 @@ parser = argparse.ArgumentParser(description='NLI training')
 parser.add_argument("--nlipath", type=str, default='dataset/SNLI/', help="NLI data path (SNLI or MultiNLI)")
 parser.add_argument("--outputdir", type=str, default='savedir/', help="Output directory")
 parser.add_argument("--outputmodelname", type=str, default='model.pickle')
-parser.add_argument("--server", type=str, default='http://atlas.robots.ox.ac.uk')
-parser.add_argument("--port", type=int, default=9003)
-parser.add_argument('--no-tqdm', dest='tqdm', action='store_false', help="use of tqdm progress bars")
-parser.set_defaults(tqdm=True)
+parser.add_argument("--server", type=str, default='http://localhost')
+parser.add_argument("--port", type=int, default=8097)
+parser.add_argument('--no_visdom', dest='visdom', action='store_false', help="use of visdom")
+parser.add_argument('--no_tqdm', dest='tqdm', action='store_false', help="use of tqdm progress bars")
+parser.set_defaults(tqdm=True, visdom=True)
 
 
 # training
@@ -59,7 +61,7 @@ parser.add_argument("--fc_dim", type=int, default=512, help="nhid of fc layers")
 parser.add_argument("--n_classes", type=int, default=3, help="entailment/neutral/contradiction")
 parser.add_argument("--pool_type", type=str, default='max', help="max or mean")
 parser.add_argument("--loss", type=str, default='svm', help="choice of loss function")
-parser.add_argument("--smooth-svm", dest="smooth_svm", action='store_true', help="smoothness of SVM")
+parser.add_argument("--smooth_svm", dest="smooth_svm", action='store_true', help="smoothness of SVM")
 parser.set_defaults(smooth_svm=False)
 
 # gpu
@@ -147,18 +149,19 @@ optimizer.step_size = params.eta
 optimizer.step_size_unclipped = params.eta
 optimizer.momentum = params.momentum
 
-params.visdom = True
 xp_name = '{}--{}--{}--eta-{}'.format(params.encoder_type, params.opt, params.loss, params.eta)
 if params.smooth_svm:
     xp_name = xp_name + '--smooth'
 params.log = True
-params.outputdir = './saved/{}'.format(xp_name)
-params.xp_name = './xp/{}'.format(xp_name)
+params.xp_name = '../../results/snli/{}'.format(xp_name)
+params.outputdir = params.xp_name
 
-if not os.path.exists(params.xp_name):
-    os.makedirs(params.xp_name)
+if os.path.exists(params.xp_name):
+    warnings.warn('An experiment already exists at {}'
+                  .format(os.path.abspath(params.xp_name)))
 else:
-    raise ValueError('Experiment already exists at {}'.format(params.xp_name))
+    os.makedirs(params.xp_name)
+
 xp = setup_xp(params, nli_net, optimizer)
 
 
