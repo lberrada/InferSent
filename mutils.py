@@ -147,7 +147,7 @@ def get_optimizer(args, parameters):
     elif args.opt == 'bpgrad':
         optimizer = BPGrad(parameters, eta=args.eta, momentum=args.momentum, weight_decay=args.l2)
     elif args.opt == 'alig':
-        optimizer = AliG(parameters, eta=args.eta, momentum=args.momentum,
+        optimizer = AliG(parameters, max_lr=args.eta, momentum=args.momentum,
                          projection_fn=lambda: l2_projection(parameters, args.max_norm))
     elif args.opt == 'bpgrad':
         optimizer = BPGrad(parameters, eta=args.eta, momentum=args.momentum, weight_decay=args.l2)
